@@ -1,0 +1,51 @@
+name: Push branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      src_branch:
+        description: Branch to read from the source repository
+        default: android-15.0
+      dst_branch:
+        description: Branch to write in the destination repository
+        default: android-15.0
+      step:
+        description: First-parent commits per push (large histories go up in parts)
+        default: "4000"
+
+jobs:
+  push:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - name: Fetch the source branch
+        env:
+          TOKEN: ${{ secrets.PUSH_TOKEN }}
+          SRC: ${{ secrets.SRC_REPO }}
+        run: |
+          test -n "$TOKEN" && test -n "$SRC"
+          git init -q --bare repo.git
+          cd repo.git
+          git config credential.helper ""
+          git config http.extraHeader "Authorization: Basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          git fetch -q --no-tags "https://github.com/${SRC}.git" \
+              "+refs/heads/${{ inputs.src_branch }}:refs/heads/src"
+          echo "commits: $(git rev-list --count src), first-parent: $(git rev-list --count --first-parent src)"
+          du -sh .
+
+      - name: Push to the destination
+        env:
+          DST: ${{ secrets.DST_REPO }}
+        run: |
+          test -n "$DST"
+          cd repo.git
+          url="https://github.com/${DST}.git"
+          ref="refs/heads/${{ inputs.dst_branch }}"
+          n=0
+          for c in $(git rev-list --reverse --first-parent src | awk -v s="${{ inputs.step }}" 'NR % s == 0'); do
+              n=$((n + 1))
+              echo "part $n"
+              git push -q "$url" "$c:$ref"
+          done
+          git push -q "$url" "src:$ref"
+          echo "pushed $(git rev-parse --short=12 src) to ${{ inputs.dst_branch }}"
