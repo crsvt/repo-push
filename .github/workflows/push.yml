@@ -12,6 +12,12 @@ on:
       step:
         description: First-parent commits per push (large histories go up in parts)
         default: "4000"
+      src_repo:
+        description: Source repository (owner/name), empty for the SRC_REPO secret
+        default: ""
+      dst_repo:
+        description: Destination repository (owner/name), empty for the DST_REPO secret
+        default: ""
 
 jobs:
   push:
@@ -21,7 +27,7 @@ jobs:
       - name: Fetch the source branch
         env:
           TOKEN: ${{ secrets.PUSH_TOKEN }}
-          SRC: ${{ secrets.SRC_REPO }}
+          SRC: ${{ inputs.src_repo || secrets.SRC_REPO }}
         run: |
           test -n "$TOKEN" && test -n "$SRC"
           git init -q --bare repo.git
@@ -35,7 +41,7 @@ jobs:
 
       - name: Push to the destination
         env:
-          DST: ${{ secrets.DST_REPO }}
+          DST: ${{ inputs.dst_repo || secrets.DST_REPO }}
         run: |
           test -n "$DST"
           cd repo.git
