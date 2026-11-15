@@ -16,10 +16,6 @@ on:
         description: Kernel repository (owner/name)
         default: crsvt/android_kernel_samsung_exynos850
 
-concurrency:
-  group: kernel-${{ inputs.branch }}-${{ inputs.defconfig }}-${{ inputs.config }}
-  cancel-in-progress: false
-
 env:
   CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz
 
