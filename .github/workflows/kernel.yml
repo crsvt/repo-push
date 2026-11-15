@@ -1,0 +1,115 @@
+name: Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Kernel branch to build
+        default: m12
+      defconfig:
+        description: Defconfig
+        default: m12_defconfig
+      config:
+        description: Extra options, space separated (CONFIG_X=y CONFIG_Y=n CONFIG_Z="str")
+        default: ""
+      repo:
+        description: Kernel repository (owner/name)
+        default: crsvt/android_kernel_samsung_exynos850
+
+concurrency:
+  group: kernel-${{ inputs.branch }}-${{ inputs.defconfig }}
+  cancel-in-progress: true
+
+env:
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Install build tools
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get update -q && sudo apt-get install -y -q bc bison flex libssl-dev libelf-dev cpio lz4 \
+                device-tree-compiler python3 ccache >/dev/null && break
+            sleep 20
+          done
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ inputs.defconfig }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ inputs.defconfig }}-
+            ccache-
+
+      - name: Fetch the kernel source
+        env:
+          TOKEN: ${{ secrets.PUSH_TOKEN }}
+        run: |
+          git clone -q --depth 1 -b "${{ inputs.branch }}" \
+              "https://x-access-token:${TOKEN}@github.com/${{ inputs.repo }}.git" kernel
+          git -C kernel remote set-url origin "https://github.com/${{ inputs.repo }}.git"
+          git -C kernel log --format='%h %s' -1
+
+      - name: Fetch the compiler
+        run: |
+          mkdir clang
+          curl -fsSL "$CLANG_URL" | tar -xz -C clang
+          clang/bin/clang --version | head -1
+
+      - name: Configure
+        run: |
+          export PATH=$PWD/clang/bin:$PATH
+          export LLVM=1 LLVM_IAS=1 ARCH=arm64 TARGET_SOC=s5e3830 PLATFORM_VERSION=14 ANDROID_MAJOR_VERSION=u
+          make -C kernel O=$PWD/out "${{ inputs.defconfig }}" > /dev/null
+          for opt in ${{ inputs.config }}; do
+              name=${opt%%=*}; val=${opt#*=}
+              case $val in
+                  y) kernel/scripts/config --file out/.config -e "${name#CONFIG_}" ;;
+                  n) kernel/scripts/config --file out/.config -d "${name#CONFIG_}" ;;
+                  m) kernel/scripts/config --file out/.config -m "${name#CONFIG_}" ;;
+                  \"*) kernel/scripts/config --file out/.config --set-str "${name#CONFIG_}" "$(eval echo $val)" ;;
+                  *) kernel/scripts/config --file out/.config --set-val "${name#CONFIG_}" "$val" ;;
+              esac
+          done
+          make -C kernel O=$PWD/out olddefconfig > /dev/null
+          for opt in ${{ inputs.config }}; do
+              name=${opt%%=*}
+              grep -E "^${name}=|^# ${name} is not set" out/.config || echo "MISSING: $name"
+          done
+
+      - name: Build
+        run: |
+          set -o pipefail
+          export PATH=$PWD/clang/bin:$PATH
+          export BRANCH=android13-kernel KMI_GENERATION=4 DTC_FLAGS="-@"
+          export LLVM=1 LLVM_IAS=1 DEPMOD=depmod ARCH=arm64 TARGET_SOC=s5e3830 PLATFORM_VERSION=14 ANDROID_MAJOR_VERSION=u
+          export CCACHE_DIR=$HOME/.cache/ccache CCACHE_MAXSIZE=3G CCACHE_BASEDIR=$PWD
+          if ! make -C kernel O=$PWD/out -j"$(nproc)" CC="ccache clang" > build.log 2>&1; then
+              echo "::group::errors"
+              grep -nE "error:|Error [0-9]|undefined reference|undefined symbol|No rule to make" build.log | head -80
+              echo "::endgroup::"
+              tail -30 build.log
+              exit 1
+          fi
+          grep -cE "warning:" build.log | sed 's/^/warnings: /'
+          ls -la out/arch/arm64/boot/Image
+          strings out/arch/arm64/boot/Image | grep -m1 'Linux version'
+
+      - name: Collect
+        if: success()
+        run: |
+          mkdir dist
+          cp out/arch/arm64/boot/Image out/.config dist/
+          find out/arch/arm64/boot/dts -name '*.dtbo' -newer out/.config -exec cp {} dist/ \;
+          cp out/arch/arm64/boot/dts/exynos/s5e3830.dtb dist/ 2>/dev/null || true
+          ls dist
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: kernel-${{ inputs.defconfig }}
+          path: dist/
+          retention-days: 3
