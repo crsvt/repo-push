@@ -1,0 +1,120 @@
+name: Kernel (msm 4.19)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Kernel branch to build
+        default: bringup
+      defconfig:
+        description: Defconfig (path under arch/arm64/configs)
+        default: vendor/msm8937-perf_defconfig
+      config:
+        description: Extra options, space separated (CONFIG_X=y CONFIG_Y=n)
+        default: ""
+      repo:
+        description: Kernel repository (owner/name)
+        default: crsvt/android_kernel_xiaomi_onclite
+
+env:
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-release/clang-r487747c.tar.gz
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Install build tools
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get update -q && sudo apt-get install -y -q bc bison flex libssl-dev libelf-dev cpio lz4 \
+                device-tree-compiler python3 ccache >/dev/null && break
+            sleep 20
+          done
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-msm-${{ github.run_id }}
+          restore-keys: ccache-msm-
+
+      - uses: actions/cache@v4
+        id: tc
+        with:
+          path: |
+            clang
+            gcc64
+            gcc32
+          key: tc-msm-r487747c
+
+      - name: Fetch the toolchain
+        if: steps.tc.outputs.cache-hit != 'true'
+        run: |
+          for i in 1 2 3 4 5 6; do
+              rm -rf clang && mkdir clang
+              curl -fsSL --retry 3 "$CLANG_URL" | tar -xz -C clang && break
+              echo "download failed, retrying"; sleep 30
+          done
+          git clone -q --depth 1 -b lineage-19.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
+          git clone -q --depth 1 -b lineage-19.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
+
+      - name: Fetch the kernel source
+        env:
+          TOKEN: ${{ secrets.PUSH_TOKEN }}
+        run: |
+          git clone -q --depth 1 -b "${{ inputs.branch }}" \
+              "https://x-access-token:${TOKEN}@github.com/${{ inputs.repo }}.git" kernel
+          git -C kernel remote set-url origin "https://github.com/${{ inputs.repo }}.git"
+          git -C kernel log --format='%h %s' -1
+
+      - name: Configure
+        run: |
+          export PATH=$PWD/clang/bin:$PWD/gcc64/bin:$PWD/gcc32/bin:$PATH
+          echo "M=O=$PWD/out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip HOSTCC=clang HOSTCXX=clang++" >> $GITHUB_ENV
+          M="O=$PWD/out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_ARM32=arm-linux-androideabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip HOSTCC=clang HOSTCXX=clang++"
+          make -C kernel $M "${{ inputs.defconfig }}" > /dev/null
+          for opt in ${{ inputs.config }}; do
+              name=${opt%%=*}; val=${opt#*=}
+              case $val in
+                  y) kernel/scripts/config --file out/.config -e "${name#CONFIG_}" ;;
+                  n) kernel/scripts/config --file out/.config -d "${name#CONFIG_}" ;;
+                  m) kernel/scripts/config --file out/.config -m "${name#CONFIG_}" ;;
+                  *) kernel/scripts/config --file out/.config --set-val "${name#CONFIG_}" "$val" ;;
+              esac
+          done
+          make -C kernel $M olddefconfig > /dev/null
+          for opt in ${{ inputs.config }}; do
+              name=${opt%%=*}
+              grep -E "^${name}=|^# ${name} is not set" out/.config || echo "MISSING: $name"
+          done
+
+      - name: Build
+        run: |
+          export PATH=$PWD/clang/bin:$PWD/gcc64/bin:$PWD/gcc32/bin:$PATH
+          export CCACHE_DIR=$HOME/.cache/ccache CCACHE_MAXSIZE=3G CCACHE_BASEDIR=$PWD
+          if ! make -C kernel $M -j"$(nproc)" CC="ccache clang" > build.log 2>&1; then
+              echo "::group::errors"
+              grep -nE "error:|Error [0-9]|undefined reference|undefined symbol|No rule to make" build.log | head -80
+              echo "::endgroup::"
+              tail -30 build.log
+              exit 1
+          fi
+          grep -cE "warning:" build.log | sed 's/^/warnings: /'
+          ls -la out/arch/arm64/boot/
+          strings out/arch/arm64/boot/Image | grep -m1 'Linux version'
+
+      - name: Collect
+        if: success()
+        run: |
+          mkdir dist
+          cp out/.config dist/kernel.config
+          cp out/arch/arm64/boot/Image* dist/ 2>/dev/null || true
+          find out/arch/arm64/boot/dts -name '*.dtb' -o -name '*.dtbo' | grep -iE "8953|632|onc" | xargs -r cp -t dist/
+          ls dist
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: kernel-msm
+          path: dist/
+          retention-days: 3
