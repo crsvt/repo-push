@@ -53,10 +53,20 @@ jobs:
           git -C kernel remote set-url origin "https://github.com/${{ inputs.repo }}.git"
           git -C kernel log --format='%h %s' -1
 
+      - uses: actions/cache@v4
+        id: clang
+        with:
+          path: clang
+          key: clang-r450784e
+
       - name: Fetch the compiler
+        if: steps.clang.outputs.cache-hit != 'true'
         run: |
-          mkdir clang
-          curl -fsSL "$CLANG_URL" | tar -xz -C clang
+          for i in 1 2 3 4 5 6; do
+              rm -rf clang && mkdir clang
+              curl -fsSL --retry 3 "$CLANG_URL" | tar -xz -C clang && break
+              echo "download failed, retrying"; sleep 30
+          done
           clang/bin/clang --version | head -1
 
       - name: Configure
