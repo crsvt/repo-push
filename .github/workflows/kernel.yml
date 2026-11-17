@@ -18,6 +18,9 @@ on:
       clang:
         description: Clang version (r450784e from master-kernel-build-2022, others from android15-qpr2-release)
         default: r450784e
+      keep_going:
+        description: Keep building after errors to list all of them (true/false)
+        default: "false"
 
 env:
   CLANG_BASE: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads
@@ -98,9 +101,10 @@ jobs:
           export BRANCH=android13-kernel KMI_GENERATION=4 DTC_FLAGS="-@"
           export LLVM=1 LLVM_IAS=1 DEPMOD=depmod ARCH=arm64 TARGET_SOC=s5e3830 PLATFORM_VERSION=14 ANDROID_MAJOR_VERSION=u
           export CCACHE_DIR=$HOME/.cache/ccache CCACHE_MAXSIZE=3G CCACHE_BASEDIR=$PWD
-          if ! make -C kernel O=$PWD/out -j"$(nproc)" CC="ccache clang" > build.log 2>&1; then
+          k=; [ "${{ inputs.keep_going }}" = true ] && k=-k
+          if ! make -C kernel O=$PWD/out -j"$(nproc)" $k CC="ccache clang" > build.log 2>&1; then
               echo "::group::errors"
-              grep -nE "error:|Error [0-9]|undefined reference|undefined symbol|No rule to make" build.log | head -80
+              grep -nE "error:|Error [0-9]|undefined reference|undefined symbol|No rule to make" build.log | head -300
               echo "::endgroup::"
               tail -30 build.log
               exit 1
