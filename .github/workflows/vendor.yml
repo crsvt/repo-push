@@ -1,0 +1,93 @@
+name: Generate vendor
+
+on:
+  workflow_dispatch:
+    inputs:
+      device_repo:
+        description: Device tree repository (owner/name)
+        default: crsvt/android_device_xiaomi_onclite
+      device_branch:
+        description: Device tree branch
+        default: lineage-22.2
+      vendor_repo:
+        description: Vendor repository (owner/name)
+        default: crsvt/android_vendor_xiaomi
+      src_branch:
+        description: Vendor branch whose blobs are re-extracted
+        default: lineage-21
+      dst_branch:
+        description: Vendor branch to write
+        default: lineage-22.2
+      los_branch:
+        description: LineageOS branch of extract-utils and extract-tools
+        default: lineage-22.2
+      device:
+        description: Device codename
+        default: onclite
+      vendor:
+        description: Vendor name
+        default: xiaomi
+      push:
+        description: Commit and push the result
+        default: "true"
+
+jobs:
+  extract:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      TOKEN: ${{ secrets.PUSH_TOKEN }}
+      DEVICE: ${{ inputs.device }}
+      VENDOR: ${{ inputs.vendor }}
+    steps:
+      - name: Prepare the tree
+        run: |
+          test -n "$TOKEN"
+          auth="Authorization: Basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          mkdir -p "android/device/$VENDOR" android/vendor android/tools android/prebuilts
+          git -c http.extraHeader="$auth" clone -q --depth 1 -b "${{ inputs.device_branch }}" \
+              "https://github.com/${{ inputs.device_repo }}.git" "android/device/$VENDOR/$DEVICE"
+          git -c http.extraHeader="$auth" clone -q --single-branch -b "${{ inputs.src_branch }}" \
+              "https://github.com/${{ inputs.vendor_repo }}.git" "android/vendor/$VENDOR"
+          git clone -q --depth 1 -b "${{ inputs.los_branch }}" \
+              https://github.com/LineageOS/android_tools_extract-utils android/tools/extract-utils
+          git clone -q --depth 1 -b "${{ inputs.los_branch }}" \
+              https://github.com/LineageOS/android_prebuilts_extract-tools android/prebuilts/extract-tools
+          cp -a "android/vendor/$VENDOR/$DEVICE/proprietary" "$RUNNER_TEMP/src"
+          git -C "android/device/$VENDOR/$DEVICE" log -1 --format='device tree: %h %s'
+          git -C "android/vendor/$VENDOR" log -1 --format='vendor base: %h %s'
+
+      - name: Extract
+        run: |
+          cd android
+          bash "device/$VENDOR/$DEVICE/extract-files.sh" "$RUNNER_TEMP/src" > "$RUNNER_TEMP/extract.log" 2>&1
+          echo "== problems"
+          grep -E '!!|WARNING|ERROR|rror' "$RUNNER_TEMP/extract.log" | grep -v CHECKELF || echo none
+          echo "== fixups"
+          grep -B2 -E 'Fixed up|Fixing up' "$RUNNER_TEMP/extract.log" || echo none
+
+      - name: Report
+        run: |
+          cd "android/vendor/$VENDOR"
+          git status --short | awk '{print $1}' | sort | uniq -c
+          git status --short | grep -v '^ D' | head -100
+          echo "== hashes of fixed-up pinned blobs"
+          grep -E '^[^#].*\|[0-9a-f]{40}\|[0-9a-f]{40}' "../../device/$VENDOR/$DEVICE/proprietary-files.txt" | while IFS='|' read -r spec pre post; do
+              dst="${spec#-}"; dst="${dst%%;*}"; dst="${dst##*:}"
+              echo "$dst pinned=$post actual=$(sha1sum "$DEVICE/proprietary/$dst" | cut -d' ' -f1)"
+          done
+
+      - name: Commit and push
+        if: inputs.push == 'true'
+        run: |
+          auth="Authorization: Basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          name=$(git -C "android/device/$VENDOR/$DEVICE" log -1 --format=%an)
+          mail=$(git -C "android/device/$VENDOR/$DEVICE" log -1 --format=%ae)
+          cd "android/vendor/$VENDOR"
+          git add -A
+          git -c user.name="$name" -c user.email="$mail" commit -q \
+              -m "$DEVICE: Regenerate for ${{ inputs.los_branch }}"
+          git log -1 --stat --format='%h %an | %s' | tail -5
+          git -c http.extraHeader="$auth" push -q -f \
+              "https://github.com/${{ inputs.vendor_repo }}.git" "HEAD:refs/heads/${{ inputs.dst_branch }}"
+          echo "pushed $(git rev-parse --short=12 HEAD) to ${{ inputs.dst_branch }}"
