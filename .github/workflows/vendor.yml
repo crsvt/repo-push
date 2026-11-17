@@ -30,6 +30,9 @@ on:
       vendor:
         description: Vendor name
         default: xiaomi
+      regen_base:
+        description: Also regenerate at the base ref first (one commit by the committer)
+        default: "false"
       push:
         description: Push the result
         default: "true"
@@ -87,10 +90,12 @@ jobs:
               git -C "$vd" log -1 --shortstat --format='  %h %an | %s' | cat
           }
 
-          echo "== base $(git -C "$dt" log -1 --format='%h %s' "$base")"
-          git -C "$dt" checkout -q "$base"
-          run_extract
-          commit_as "origin/${{ inputs.device_branch }}" "$DEVICE: Regenerate with ${{ inputs.los_branch }} extract-utils" committer
+          if [ "${{ inputs.regen_base }}" = true ]; then
+              echo "== base $(git -C "$dt" log -1 --format='%h %s' "$base")"
+              git -C "$dt" checkout -q "$base"
+              run_extract
+              commit_as "origin/${{ inputs.device_branch }}" "$DEVICE: Regenerate with ${{ inputs.los_branch }} extract-utils" committer
+          fi
 
           for c in $(git -C "$dt" rev-list --reverse --first-parent --no-merges "$base..origin/${{ inputs.device_branch }}"); do
               echo "== $(git -C "$dt" log -1 --format='%h %an | %s' "$c")"
