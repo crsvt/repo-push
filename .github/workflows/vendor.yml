@@ -72,13 +72,14 @@ jobs:
               else
                   (cd "$PWD/android" && bash "$dt/extract-files.sh" "$RUNNER_TEMP/src") > "$RUNNER_TEMP/extract.log" 2>&1
               fi || { tail -40 "$RUNNER_TEMP/extract.log"; return 1; }
-              grep -E '!!|WARNING|ERROR|rror' "$RUNNER_TEMP/extract.log" | grep -v CHECKELF || true
+              grep -iE '!!|warn|error|expected|has fixup hash|but |Traceback' "$RUNNER_TEMP/extract.log" | grep -v CHECKELF || true
           }
           commit_as() {
               git -C "$vd" add -A
               git -C "$vd" diff --cached --quiet && { echo "  no vendor change"; return 0; }
-              GIT_AUTHOR_NAME="$(git -C "$dt" log -1 --format=%an "$1")" \
-              GIT_AUTHOR_EMAIL="$(git -C "$dt" log -1 --format=%ae "$1")" \
+              a=a; [ "${3:-}" = committer ] && a=c
+              GIT_AUTHOR_NAME="$(git -C "$dt" log -1 --format=%${a}n "$1")" \
+              GIT_AUTHOR_EMAIL="$(git -C "$dt" log -1 --format=%${a}e "$1")" \
               GIT_AUTHOR_DATE="$(git -C "$dt" log -1 --format=%aD "$1")" \
               GIT_COMMITTER_NAME="$(git -C "$dt" log -1 --format=%cn "$1")" \
               GIT_COMMITTER_EMAIL="$(git -C "$dt" log -1 --format=%ce "$1")" \
@@ -89,7 +90,7 @@ jobs:
           echo "== base $(git -C "$dt" log -1 --format='%h %s' "$base")"
           git -C "$dt" checkout -q "$base"
           run_extract
-          commit_as "${{ inputs.device_branch }}" "$DEVICE: Regenerate with ${{ inputs.los_branch }} extract-utils"
+          commit_as "origin/${{ inputs.device_branch }}" "$DEVICE: Regenerate with ${{ inputs.los_branch }} extract-utils" committer
 
           for c in $(git -C "$dt" rev-list --reverse --first-parent --no-merges "$base..origin/${{ inputs.device_branch }}"); do
               echo "== $(git -C "$dt" log -1 --format='%h %an | %s' "$c")"
@@ -104,12 +105,12 @@ jobs:
 
       - name: Report
         run: |
-          dt="android/device/$VENDOR/$DEVICE"
+          dt="$PWD/android/device/$VENDOR/$DEVICE"
           cd "android/vendor/$VENDOR"
           git log --format='%h %an | %s' "origin/${{ inputs.src_branch }}..HEAD" | cat
           git diff --stat "origin/${{ inputs.src_branch }}" HEAD | tail -1
           echo "== pinned blobs with a post-fixup hash"
-          grep -hE '^[^#].*\|[0-9a-f]{40}\|[0-9a-f]{40}' ../../$dt/proprietary-files*.txt | while IFS='|' read -r spec pre post; do
+          grep -hE '^[^#].*\|[0-9a-f]{40}\|[0-9a-f]{40}' "$dt"/proprietary-files*.txt | while IFS='|' read -r spec pre post; do
               dst="${spec#-}"; dst="${dst%%;*}"; dst="${dst##*:}"
               echo "$dst pinned=$post actual=$(sha1sum "$DEVICE/proprietary/$dst" | cut -d' ' -f1)"
           done
