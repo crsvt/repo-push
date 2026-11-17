@@ -9,6 +9,9 @@ on:
       device_branch:
         description: Device tree branch
         default: lineage-22.2
+      base_ref:
+        description: Device tree ref the vendor source branch was generated from
+        default: lineage-21
       vendor_repo:
         description: Vendor repository (owner/name)
         default: crsvt/android_vendor_xiaomi
@@ -28,13 +31,13 @@ on:
         description: Vendor name
         default: xiaomi
       push:
-        description: Commit and push the result
+        description: Push the result
         default: "true"
 
 jobs:
   extract:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       TOKEN: ${{ secrets.PUSH_TOKEN }}
       DEVICE: ${{ inputs.device }}
@@ -45,8 +48,10 @@ jobs:
           test -n "$TOKEN"
           auth="Authorization: Basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
           mkdir -p "android/device/$VENDOR" android/vendor android/tools android/prebuilts
-          git -c http.extraHeader="$auth" clone -q --depth 1 -b "${{ inputs.device_branch }}" \
+          git -c http.extraHeader="$auth" clone -q -b "${{ inputs.device_branch }}" \
               "https://github.com/${{ inputs.device_repo }}.git" "android/device/$VENDOR/$DEVICE"
+          git -C "android/device/$VENDOR/$DEVICE" -c http.extraHeader="$auth" fetch -q origin \
+              "+refs/heads/${{ inputs.base_ref }}:refs/remotes/origin/${{ inputs.base_ref }}"
           git -c http.extraHeader="$auth" clone -q --single-branch -b "${{ inputs.src_branch }}" \
               "https://github.com/${{ inputs.vendor_repo }}.git" "android/vendor/$VENDOR"
           git clone -q --depth 1 -b "${{ inputs.los_branch }}" \
@@ -54,40 +59,66 @@ jobs:
           git clone -q --depth 1 -b "${{ inputs.los_branch }}" \
               https://github.com/LineageOS/android_prebuilts_extract-tools android/prebuilts/extract-tools
           cp -a "android/vendor/$VENDOR/$DEVICE/proprietary" "$RUNNER_TEMP/src"
-          git -C "android/device/$VENDOR/$DEVICE" log -1 --format='device tree: %h %s'
           git -C "android/vendor/$VENDOR" log -1 --format='vendor base: %h %s'
 
-      - name: Extract
+      - name: Extract per device commit
         run: |
-          cd android
-          bash "device/$VENDOR/$DEVICE/extract-files.sh" "$RUNNER_TEMP/src" > "$RUNNER_TEMP/extract.log" 2>&1
-          echo "== problems"
-          grep -E '!!|WARNING|ERROR|rror' "$RUNNER_TEMP/extract.log" | grep -v CHECKELF || echo none
-          echo "== fixups"
-          grep -B2 -E 'Fixed up|Fixing up' "$RUNNER_TEMP/extract.log" || echo none
+          dt="$PWD/android/device/$VENDOR/$DEVICE"
+          vd="$PWD/android/vendor/$VENDOR"
+          base="origin/${{ inputs.base_ref }}"
+          run_extract() {
+              if [ -f "$dt/extract-files.py" ]; then
+                  (cd "$dt" && ./extract-files.py "$RUNNER_TEMP/src") > "$RUNNER_TEMP/extract.log" 2>&1
+              else
+                  (cd "$PWD/android" && bash "$dt/extract-files.sh" "$RUNNER_TEMP/src") > "$RUNNER_TEMP/extract.log" 2>&1
+              fi || { tail -40 "$RUNNER_TEMP/extract.log"; return 1; }
+              grep -E '!!|WARNING|ERROR|rror' "$RUNNER_TEMP/extract.log" | grep -v CHECKELF || true
+          }
+          commit_as() {
+              git -C "$vd" add -A
+              git -C "$vd" diff --cached --quiet && { echo "  no vendor change"; return 0; }
+              GIT_AUTHOR_NAME="$(git -C "$dt" log -1 --format=%an "$1")" \
+              GIT_AUTHOR_EMAIL="$(git -C "$dt" log -1 --format=%ae "$1")" \
+              GIT_AUTHOR_DATE="$(git -C "$dt" log -1 --format=%aD "$1")" \
+              GIT_COMMITTER_NAME="$(git -C "$dt" log -1 --format=%cn "$1")" \
+              GIT_COMMITTER_EMAIL="$(git -C "$dt" log -1 --format=%ce "$1")" \
+                  git -C "$vd" commit -q -m "$2"
+              git -C "$vd" log -1 --shortstat --format='  %h %an | %s' | cat
+          }
+
+          echo "== base $(git -C "$dt" log -1 --format='%h %s' "$base")"
+          git -C "$dt" checkout -q "$base"
+          run_extract
+          commit_as "${{ inputs.device_branch }}" "$DEVICE: Regenerate with ${{ inputs.los_branch }} extract-utils"
+
+          for c in $(git -C "$dt" rev-list --reverse --first-parent --no-merges "$base..origin/${{ inputs.device_branch }}"); do
+              echo "== $(git -C "$dt" log -1 --format='%h %an | %s' "$c")"
+              git -C "$dt" checkout -q "$c"
+              if git -C "$dt" diff --quiet "$c~1" "$c" -- 'proprietary-files*.txt' 'extract-files.*' 'setup-makefiles.*'; then
+                  echo "  no extraction input change"
+                  continue
+              fi
+              run_extract
+              commit_as "$c" "$(git -C "$dt" log -1 --format=%s "$c")"
+          done
 
       - name: Report
         run: |
+          dt="android/device/$VENDOR/$DEVICE"
           cd "android/vendor/$VENDOR"
-          git status --short | awk '{print $1}' | sort | uniq -c
-          git status --short | grep -v '^ D' | head -100
-          echo "== hashes of fixed-up pinned blobs"
-          grep -E '^[^#].*\|[0-9a-f]{40}\|[0-9a-f]{40}' "../../device/$VENDOR/$DEVICE/proprietary-files.txt" | while IFS='|' read -r spec pre post; do
+          git log --format='%h %an | %s' "origin/${{ inputs.src_branch }}..HEAD" | cat
+          git diff --stat "origin/${{ inputs.src_branch }}" HEAD | tail -1
+          echo "== pinned blobs with a post-fixup hash"
+          grep -hE '^[^#].*\|[0-9a-f]{40}\|[0-9a-f]{40}' ../../$dt/proprietary-files*.txt | while IFS='|' read -r spec pre post; do
               dst="${spec#-}"; dst="${dst%%;*}"; dst="${dst##*:}"
               echo "$dst pinned=$post actual=$(sha1sum "$DEVICE/proprietary/$dst" | cut -d' ' -f1)"
           done
 
-      - name: Commit and push
+      - name: Push
         if: inputs.push == 'true'
         run: |
           auth="Authorization: Basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
-          name=$(git -C "android/device/$VENDOR/$DEVICE" log -1 --format=%an)
-          mail=$(git -C "android/device/$VENDOR/$DEVICE" log -1 --format=%ae)
           cd "android/vendor/$VENDOR"
-          git add -A
-          git -c user.name="$name" -c user.email="$mail" commit -q \
-              -m "$DEVICE: Regenerate for ${{ inputs.los_branch }}"
-          git log -1 --stat --format='%h %an | %s' | tail -5
           git -c http.extraHeader="$auth" push -q -f \
               "https://github.com/${{ inputs.vendor_repo }}.git" "HEAD:refs/heads/${{ inputs.dst_branch }}"
           echo "pushed $(git rev-parse --short=12 HEAD) to ${{ inputs.dst_branch }}"
