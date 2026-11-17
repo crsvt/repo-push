@@ -15,9 +15,12 @@ on:
       repo:
         description: Kernel repository (owner/name)
         default: crsvt/android_kernel_samsung_exynos850
+      clang:
+        description: Clang version (r450784e from master-kernel-build-2022, others from android15-qpr2-release)
+        default: r450784e
 
 env:
-  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz
+  CLANG_BASE: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads
 
 jobs:
   build:
@@ -53,14 +56,16 @@ jobs:
         id: clang
         with:
           path: clang
-          key: clang-r450784e
+          key: clang-${{ inputs.clang }}
 
       - name: Fetch the compiler
         if: steps.clang.outputs.cache-hit != 'true'
         run: |
+          ref=android15-qpr2-release
+          [ "${{ inputs.clang }}" = r450784e ] && ref=master-kernel-build-2022
           for i in 1 2 3 4 5 6; do
               rm -rf clang && mkdir clang
-              curl -fsSL --retry 3 "$CLANG_URL" | tar -xz -C clang && break
+              curl -fsSL --retry 3 "$CLANG_BASE/$ref/clang-${{ inputs.clang }}.tar.gz" | tar -xz -C clang && break
               echo "download failed, retrying"; sleep 30
           done
           clang/bin/clang --version | head -1
